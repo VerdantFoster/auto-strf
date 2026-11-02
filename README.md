@@ -94,9 +94,22 @@ Files are saved in `data/waterfall/<observation_id>/`:
 - `seed.tle`: tracking TLE used to initialize the fit.
 - `rffit_candidate.tle`: fitted candidate TLE.
 - `rffit_residuals.csv`: observed frequencies, predictions, and residuals.
-- `rffit_result.png`: fit and residual plots.
+- `rffit_result.png`: frequency fit and residual panels on a white background.
+- `rffit_full.png`: complete STRF view on a black background, including the Doppler curve, radial-velocity axis, sky plot, candidate TLE, measurement count, RMS, TCA (when available), TLE epoch, and fitted-parameter indicators.
 - `rffit_provenance.json`: input hashes, fitting settings, and metrics.
 - `rffit.log`: fitting log.
+
+Both PNGs are saved automatically by `satnogs_waterfall.fit_outputs`. No graphical desktop is needed for file export. The full view uses the saved candidate TLE and the transmitter frequency from the batch fit; it does not run another optimization. Parameter indicators show the selected fitting mode and are not interactive in the saved image. The full-view RMS is checked against the residual CSV before the outputs are saved.
+
+To update an existing installation and regenerate the plots, run from the repository directory with your Python environment activated:
+
+```sh
+git pull --ff-only
+make rffit rffit-batch
+python -m satnogs_waterfall.fit_outputs "$OBS_ID" --mode mamm --replace
+```
+
+Set `OBS_ID` to an observation that has already been exported, and choose the same fitting mode you intend to use. `--replace` repeats the fit and replaces its existing outputs, including the candidate TLE and both plots. Successful waterfall calibration and measurement export are still required.
 
 Candidate TLEs do not automatically replace an operational catalog. Review the signal selection and validate predictions against independent observations before using a candidate for tracking.
 

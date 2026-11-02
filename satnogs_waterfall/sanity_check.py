@@ -140,4 +140,91 @@ class PipelineChecks(unittest.TestCase):
             self.assertNotIn('observer',json.loads((Path(tmp)/'123/metadata.json').read_text()))
 
 
+class FullFrameChecks(unittest.TestCase):
+    def setUp(self):
+        from PIL import Image
+        from .calibration import sha256
+        from .doppler import tracking_shift_hz
+        from .fit_outputs import ROOT
+        if not all((ROOT / name).exists() for name in ('rffit', 'rffit-batch')):
+            self.skipTest('Build rffit and rffit-batch first')
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.folder = folder = Path(tmp.name)
+        # Public upstream orbit with entirely synthetic station and RF data.
+        lines = ['SYNTHETIC TEST',
+                 '1 52736U 22057E   23036.86389985  .00017304  00000-0  82793-3 0  9996',
+                 '2 52736  97.5231 153.7414 0006358  83.3132 276.8826 15.19025879 38769']
+        meta = dict(id=1, norad_cat_id=52736, ground_station=1, tle1=lines[1], tle2=lines[2])
+        sat = validate_tle(meta)
+        jd = sat.jdsatepoch + sat.jdsatepochF
+        _, r, _ = sat.sgp4(sat.jdsatepoch, sat.jdsatepochF)
+        centuries = (jd - 2451545.0) / 36525
+        theta = (280.46061837 + 360.98564736629 * (jd - 2451545.0)
+                 + .000387933 * centuries**2 - centuries**3 / 38710000) % 360
+        # Station near the subsatellite point makes a visible pass for the sky plot.
+        lat = round(float(np.rad2deg(np.arctan2(r[2], np.hypot(r[0], r[1])))), 5)
+        lon = round(float((np.rad2deg(np.arctan2(r[1], r[0])) - theta + 180) % 360 - 180), 5)
+        meta.update(station_lat=lat, station_lng=lon, station_alt=0)
+        times = np.round(jd - 2400000.5 + np.linspace(-180, 180, 61) / 86400, 10)
+        freq = 437e6 + tracking_shift_hz(times, meta, 437e6) + .1 * np.sin(np.arange(61))
+        np.savetxt(folder / 'measurements.dat', np.c_[times, freq, np.ones(61), np.ones(61)],
+                   fmt=['%.10f', '%.6f', '%.1f', '%d'])
+        (folder / 'seed.tle').write_text('\n'.join(lines) + '\n')
+        (folder / 'sites.txt').write_text(f'0001 SN {lat:9.5f} {lon:9.5f}     0    Synthetic station\n')
+        (folder / 'metadata.json').write_text(json.dumps(meta))
+        Image.new('RGB', (100, 100)).save(folder / 'waterfall.png')
+        selection = dict(export_schema=3, observation_id=1, method='synthetic_test')
+        for key, name in [('dat_sha256', 'measurements.dat'), ('png_sha256', 'waterfall.png'),
+                          ('metadata_sha256', 'metadata.json')]:
+            selection[key] = sha256(folder / name)
+        (folder / 'selection.json').write_text(json.dumps(selection))
+
+    def test_full_frame_headless_matches_batch(self):
+        import os
+        from PIL import Image
+        from .fit_outputs import run, OUTPUT_NAMES
+        from .calibration import sha256
+        env = {k: v for k, v in os.environ.items() if k not in ('DISPLAY', 'WAYLAND_DISPLAY')}
+        with patch.dict(os.environ, env, clear=True):
+            for mode in ('fixed', 'ma', 'mamm', 'raan', 'maraan', 'mammraan'):
+                with self.subTest(mode=mode):
+                    provenance = run(self.folder, replace=True, mode=mode)
+                    self.assertEqual(provenance['metrics']['n'], 61)
+                    self.assertFalse(provenance['full_frame']['refitted'])
+                    self.assertTrue(np.isfinite(provenance['fitted_frequency_hz']))
+                    for name in OUTPUT_NAMES:
+                        self.assertTrue((self.folder / name).is_file())
+                    for name, digest in provenance['output_sha256'].items():
+                        self.assertEqual(sha256(self.folder / name), digest)
+                    with Image.open(self.folder / 'rffit_full.png') as im:
+                        rgb = np.asarray(im.convert('RGB'))
+                        self.assertGreater(im.width, 600)
+                        self.assertGreater(im.height, 400)
+                        self.assertGreater(np.mean(np.all(rgb == 0, axis=2)), .5)
+                        self.assertGreater(np.count_nonzero(rgb[:im.height//2, int(im.width*.7):]), 100)
+                    log = (self.folder / 'rffit.log').read_text()
+                    self.assertIn('render_rms_hz=', log)
+                    lines = (self.folder / 'rffit_candidate.tle').read_text().splitlines()
+                    self.assertEqual(validate_tle(dict(norad_cat_id=52736, tle1=lines[1], tle2=lines[2])).satnum, 52736)
+
+    def test_export_failure_does_not_publish_outputs(self):
+        from .fit_outputs import run, OUTPUT_NAMES
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                if existing:
+                    for name in OUTPUT_NAMES:
+                        (self.folder / name).write_bytes(b'previous output')
+                with patch('satnogs_waterfall.fit_outputs.export_full_frame',
+                           side_effect=ValueError('Full-frame export failed')):
+                    with self.assertRaisesRegex(ValueError, 'Full-frame export failed'):
+                        run(self.folder, replace=existing, mode='fixed')
+                for name in OUTPUT_NAMES:
+                    if existing:
+                        self.assertEqual((self.folder / name).read_bytes(), b'previous output')
+                    else:
+                        self.assertFalse((self.folder / name).exists())
+                self.assertFalse(list(self.folder.glob('.rffit-*')))
+
+
 if __name__=='__main__':unittest.main()
