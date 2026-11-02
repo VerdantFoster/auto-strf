@@ -45,6 +45,7 @@ int dsmin(double **p,double *y,int n,double ftol,double (*func)(double *))
 
     if (nfunk>=NMAX) {
       printf("dsmin: NMAX exceeded!\n");
+      free(psum);
       return -1;
     }
     nfunk+=2;

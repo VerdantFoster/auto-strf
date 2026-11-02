@@ -1,52 +1,40 @@
-from datetime import datetime
-import numpy as np
-import glob
-import os
-import re
+"""Read legacy float32 STRF spectrum records; not a PNG pipeline stage."""
+from datetime import datetime,timezone
 from pathlib import Path
-
-
-def read_spectrum(path):
-    # Get the number of files
-    filenames = glob.glob(os.path.join(path, '*.bin'))
-    datestr = Path(filenames[0]).stem.split('_')[0]
-
-    # Read first file to get the number of channels and number of "samples"
-    filename = os.path.join(path, '{:s}_{:06}.bin'.format(datestr, 0))
-    with open(filename, 'rb') as f:
-        header = parse_header(f.read(256))
-
-    zs = []
-    headers = []
-    for i_file in range(len(filenames)):
-        filename = os.path.join(path, '{:s}_{:06}.bin'.format(datestr, i_file))
-        # i_sub = 0
-        with open(filename, 'rb') as f:
-            next_header = f.read(256)
-            while(next_header):
-                headers.append(parse_header(next_header))
-                zs.append(np.fromfile(f, dtype=np.float32, count=header["nchan"]))
-                next_header = f.read(256)
-    return np.transpose(np.vstack(zs)), headers
+import re
+import numpy as np
 
 
 def parse_header(header_b):
-    # TODO. Support files with the additional fields
-    #       - NBITS
-    #       - MEAN
-    #       - RMS
-    # "HEADER\nUTC_START    %s\nFREQ         %lf Hz\nBW           %lf Hz\nLENGTH       %f s\nNCHAN        %d\nNSUB         %d\n"
+    if len(header_b)!=256:raise ValueError('Truncated spectrum header')
+    try:
+        text=header_b.decode('ASCII').strip('\x00')
+        pattern=r'^HEADER\nUTC_START\s+([^\n]+)\nFREQ\s+([^\n]+) Hz\nBW\s+([^\n]+) Hz\nLENGTH\s+([^\n]+) s\nNCHAN\s+([^\n]+)\nNSUB\s+([^\n]+)\nEND\n$'
+        m=re.fullmatch(pattern,text)
+        if m is None:raise ValueError('Unsupported spectrum header (only float32 records supported)')
+        h=dict(utc_start=datetime.fromisoformat(m[1]).replace(tzinfo=timezone.utc),freq=float(m[2]),bw=float(m[3]),length=float(m[4]),nchan=int(m[5]),nsub=int(m[6]))
+        if not np.isfinite([h['freq'],h['bw'],h['length']]).all() or min(h['freq'],h['bw'],h['length'],h['nchan'],h['nsub'])<=0:raise ValueError('Invalid spectrum dimensions')
+        return h
+    except (UnicodeError,TypeError,OverflowError) as exc:raise ValueError('Invalid spectrum header') from exc
 
-    header_s = header_b.decode('ASCII').strip('\x00')
 
-    regex = r"^HEADER\nUTC_START    (.*)\nFREQ         (.*) Hz\nBW           (.*) Hz\nLENGTH       (.*) s\nNCHAN        (.*)\nNSUB         (.*)\nEND\n$"
-    match = re.fullmatch(regex, header_s, re.MULTILINE)
-
-    utc_start = datetime.strptime(match.group(1), '%Y-%m-%dT%H:%M:%S.%f')
-
-    return {'utc_start': utc_start,
-            'freq': float(match.group(2)),
-            'bw': float(match.group(3)),
-            'length': float(match.group(4)),
-            'nchan': int(match.group(5)),
-            'nsub': int(match.group(6))}
+def read_spectrum(path):
+    files=sorted(Path(path).glob('*.bin'))
+    if not files:raise ValueError('No STRF spectrum .bin files found')
+    records=[]
+    for file in files:
+        with file.open('rb') as stream:
+            while True:
+                block=stream.read(256)
+                if not block:break
+                header=parse_header(block)
+                z=np.fromfile(stream,dtype=np.float32,count=header['nchan'])
+                if len(z)!=header['nchan'] or not np.isfinite(z).all():raise ValueError('Truncated or nonfinite spectrum samples')
+                records.append((header,z))
+    if not records:raise ValueError('Empty spectrum files')
+    records.sort(key=lambda row:row[0]['utc_start'])
+    first=records[0][0]
+    for i,(h,z) in enumerate(records):
+        if any(h[k]!=first[k] for k in ('freq','bw','nchan')):raise ValueError('Spectrum grid changes between records')
+        if i and h['utc_start']<=records[i-1][0]['utc_start']:raise ValueError('Duplicate spectrum timestamp')
+    return np.column_stack([z for h,z in records]),[h for h,z in records]

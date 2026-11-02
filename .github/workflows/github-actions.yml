@@ -1,14 +1,17 @@
 name: GitHub Actions
-run-name: Building and testing STRF
+run-name: Building STRF
 on: [push]
 jobs:
   GitHub-Actions:
     runs-on: ubuntu-latest
     steps:
       - run: sudo apt update -y
-      - run: sudo apt install -y --no-install-recommends make gcc pgplot5 gfortran libpng-dev libx11-dev libgsl-dev libfftw3-dev libsox-dev libcmocka-dev libcmocka0
+      - run: sudo apt install -y --no-install-recommends make gcc pgplot5 gfortran libpng-dev libx11-dev libgsl-dev libfftw3-dev libsox-dev python3-venv
       - name: Check out repository code
         uses: actions/checkout@v3
       - run: cd ${{ github.workspace }}
       - run: make
-      - run: make tests
+      - run: make rffit-batch
+      - run: python3 -m venv .venv
+      - run: .venv/bin/python -m pip install -r satnogs_waterfall/requirements.txt
+      - run: .venv/bin/python -m satnogs_waterfall.sanity_check

@@ -1,6 +1,6 @@
 # "New" Python STRF environment variables
 
-SATNOGS_DIR=/home/pi/satnogs_data
+SATNOGS_DIR=./data/local
 
 # SatNOGS Waterfall Tabulation Helper
 export SATNOGS_TLE_DIR=$SATNOGS_DIR/tles/satnogs

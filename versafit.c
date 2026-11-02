@@ -4,6 +4,7 @@
 #include <math.h>
 #include <string.h>
 
+int STRF_FIT_STATUS=0; // Last primary minimization result; negative means nonconvergence.
 int OUTPUT=1; // Print output on screen (1 = yes; 0 = no)
 int ERRCOMP=0; // Set reduced Chi-Squared to unity (1 = yes; 0 = no)
 
@@ -43,6 +44,7 @@ void versafit(int m,int n,double *a,double *da,double (*func)(double *),double d
     // Compute simplex and minimize function
     p=simplex(n,a,da);
     nfunk=dsmin(p,y,n,tol,func);
+    STRF_FIT_STATUS=nfunk;
 
     // Average parameters
     for (i=0;i<n;i++) {

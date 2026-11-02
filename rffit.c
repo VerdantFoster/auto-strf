@@ -134,7 +134,7 @@ void format_tle(orbit_t orb,char *line1,char *line2)
     else if (line1[i]=='-')
       csum++;
   }
-  sprintf(csumstr,"%d",csum%10);
+  csumstr[0]='0'+csum%10;csumstr[1]='\0';
   strcat(line1,csumstr);
   for (i=0,csum=0;i<strlen(line2);i++) {
     if (isdigit(line2[i]))
@@ -142,7 +142,7 @@ void format_tle(orbit_t orb,char *line1,char *line2)
     else if (line2[i]=='-')
       csum++;
   }
-  sprintf(csumstr,"%d",csum%10);
+  csumstr[0]='0'+csum%10;csumstr[1]='\0';
   strcat(line2,csumstr);
 
   return;
@@ -276,6 +276,11 @@ void usage()
   printf("-g              GRAVES data\n");
   printf("-m <offset>     Frequency offset to apply [Hz]\n");
   printf("-F <freqlist>   List with frequencies [$ST_DATADIR/data/frequencies.txt]\n");
+  printf("-P <device>     Export one complete native frame, e.g. output.png/png\n");
+  printf("-f <Hz>         Fitted RF for export; evaluate loaded TLE without refitting\n");
+  printf("-a <digits>     Free parameter indicators 1..8 (default 8); export only\n");
+  printf("-j              Residual view in exported frame\n");
+  printf("-b <MJD> -e <MJD> Full display window for export; must include data\n");
   printf("-h              This help\n");
   
   return;
@@ -288,6 +293,7 @@ int main(int argc,char *argv[])
   char xlabel[64],ylabel[32],text[64],freqlist[128];
   int site_id=0;
   float xmin,xmax,ymin,ymax;
+  float frequency_ymin=0,frequency_ymax=0;
   float xminsel,xmaxsel,yminsel,ymaxsel;
   float x0=0.0,y0=0.0,x=0.0,y=0.0;
   double mjd,v,v1,azi,alt,rms=0.0,day,mjdtca=-1,altmin=0.0,mjdmid,mjdepoch=-1;
@@ -296,6 +302,10 @@ int main(int argc,char *argv[])
   int mode=0,posn=0,click=0;
   char *catalog=NULL,*datafile=NULL,filename[64],default_filename[64],string[64],bstar[10]=" 00000-0";
   int arg=0,nobs=0;
+  char *export_device=NULL,*export_free="8";
+  double export_frequency_hz=0;
+  int export_residuals=0;
+  double export_start=NAN,export_end=NAN;
   FILE *fp,*std,*fpres;
   char line0[72],line1[72],line2[72];
   int ia[]={0,0,0,0,0,0,0};
@@ -319,8 +329,34 @@ int main(int argc,char *argv[])
   sprintf(freqlist,"%s/data/frequencies.txt",env);  
   
   // Decode options
-  while ((arg=getopt(argc,argv,"d:c:i:hs:gm:F:"))!=-1) {
+  while ((arg=getopt(argc,argv,"d:c:i:hs:gm:F:P:a:f:jb:e:"))!=-1) {
     switch(arg) {
+    case 'b':
+    case 'e': {
+      char *end;double value=strtod(optarg,&end);
+      if(end==optarg || *end || !isfinite(value)) {
+        fprintf(stderr,"Invalid display MJD\n");return 2;
+      }
+      if(arg=='b')export_start=value;else export_end=value;
+      break;
+    }
+    case 'P':
+      export_device=optarg;
+      break;
+    case 'a':
+      export_free=optarg;
+      break;
+    case 'f': {
+      char *end;
+      export_frequency_hz=strtod(optarg,&end);
+      if(end==optarg || *end || !isfinite(export_frequency_hz) || export_frequency_hz<=0) {
+        fprintf(stderr,"Invalid export frequency in Hz\n");return 2;
+      }
+      break;
+    }
+    case 'j':
+      export_residuals=1;
+      break;
     case 'd':
       datafile=optarg;
       break;
@@ -360,6 +396,10 @@ int main(int argc,char *argv[])
     }
   }
 
+  if(isfinite(export_start)!=isfinite(export_end) ||
+     (isfinite(export_start) && (!export_device || export_start>=export_end))) {
+    fprintf(stderr,"Display bounds require -P and both -b start_MJD -e end_MJD\n");return 2;
+  }
   // Read data
   d=read_data(datafile,graves,foffset);
   d.fitfreq=1;
@@ -420,15 +460,36 @@ int main(int argc,char *argv[])
     }
   }
 
-  if (freopen("/tmp/stderr.txt","w",stderr)==NULL)
-    fprintf(stderr,"Failed to redirect stderr\n");
-
-  cpgopen("/xs");
+  /* Export the same complete frame as the interactive renderer. The loaded
+   * candidate and fitted frequency are evaluated without another optimization. */
+  if(export_device) {
+    if(satno<0 || export_frequency_hz<=0) {
+      fprintf(stderr,"Export requires a loaded TLE (-i) and fitted RF in Hz (-f)\n");return 2;
+    }
+    if(isfinite(export_start) && (export_start>d.mjdmin || export_end<d.mjdmax)) {
+      fprintf(stderr,"Display bounds must include all measurements\n");return 2;
+    }
+    d.ffit=export_frequency_hz/1000.;d.fitfreq=0;
+    for(i=0;export_free[i];i++) {
+      if(export_free[i]<'1'||export_free[i]>'8') {
+        fprintf(stderr,"Free parameter indicators must be digits 1..8\n");return 2;
+      }
+      if(export_free[i]=='8')d.fitfreq=1;else ia[export_free[i]-'1']=1;
+    }
+    for(i=0;i<d.n;i++)d.p[i].flag=2;
+    nobs=d.n;residuals=export_residuals;
+  }
+  if(cpgopen(export_device ? export_device : "/xs")<=0)return 2;
+  if(export_device) {
+    cpgscr(0,0,0,0);cpgscr(1,1,1,1);
+    cpgpap(12.,.75);cpgsch(.8);
+  }
   cpgask(0);
 
   // Axis limits
   xmin=d.mjdmin-0.1*d.dmjd-d.mjd0;
   xmax=d.mjdmax+0.1*d.dmjd-d.mjd0;
+  if(isfinite(export_start)) {xmin=export_start-d.mjd0;xmax=export_end-d.mjd0;}
   if (graves==0) {
     ymin=-12.0*d.f0/C;
     ymax=12*d.f0/C;
@@ -444,6 +505,14 @@ int main(int argc,char *argv[])
   // For ever loop
   for (;;) {
     if (redraw==1) {
+      if(satno>0)rms=compute_rms();
+      if(residuals) {
+        float limit=.001;
+        for(i=0;i<d.n;i++)if(d.p[i].flag)limit=fmaxf(limit,fabsf(d.p[i].res));
+        ymin=-1.15*limit;ymax=1.15*limit;
+        strcpy(ylabel,"Residual (kHz)");
+      } else sprintf(ylabel,"Frequency - %.0f kHz",d.f0);
+      mjdtca=-1;
       // Plot buttons
       cpgpage();
       cpgsvp(0.1,0.95,0.0,0.2);
@@ -499,7 +568,7 @@ int main(int argc,char *argv[])
 
 	  // Get TCA
 	  if (i>0) {
-	    if (vtca*v<0.0 && alt>0 && mjd<d.mjdmax && mjd>d.mjdmin) {
+	    if (vtca*v<0.0 && alt>0 && mjd<(isfinite(export_end)?export_end:d.mjdmax) && mjd>(isfinite(export_start)?export_start:d.mjdmin)) {
 	      mjdtca=mjd;
 	    }
 	  }
@@ -552,12 +621,17 @@ int main(int argc,char *argv[])
       sprintf(text,"Frequency: %.3f MHz",d.ffit/1000.0);
       cpgtext(0.0,0.85,text);
 
+      // RMS remains available even when the sampled arc has no TCA.
+      if (satno>0) {
+        sprintf(text,"rms: %.3f kHz",rms);
+        cpgtext(0.0,0.7,text);
+      }
       // Print/plot TCA
       if (mjdtca>0) {
-	sprintf(text,"rms: %.3f kHz",rms);
-	cpgtext(0.0,0.7,text);
 	sprintf(text,"T\\dCA\\u: %s",nfdtca);
 	cpgtext(0.0,0.55,text);
+      } else if(satno>0) {
+        cpgtext(0.0,0.55,"T\\dCA\\u: unavailable in window");
       }
       // Print TLE epoch
       if (satno>0) {
@@ -567,7 +641,7 @@ int main(int argc,char *argv[])
 	cpgtext(0.0,0.425,text);
       }
 
-      sprintf(text,"%s (%04d)",site.observer,site.id);
+      snprintf(text,sizeof(text),"%.48s (%04d)",site.observer,site.id);
       cpgtext(0.0,0.3,text);
 
       
@@ -592,8 +666,11 @@ int main(int argc,char *argv[])
       //      cpgenv(xmin,xmax,ymin,ymax,0,0);
       cpglab(xlabel,ylabel,"");
 
+      if(residuals) {
+        cpgsls(2);cpgmove(xmin,0);cpgdraw(xmax,0);cpgsls(1);
+      }
       // Plot TCA
-      if (satno>0) {
+      if (satno>0 && mjdtca>0) {
 	cpgsci(2);
 	cpgsls(2);
 	cpgmove(mjdtca-d.mjd0,ymin);
@@ -614,6 +691,13 @@ int main(int argc,char *argv[])
 	cpgsls(1);
       }
       
+      // TLE header is also shown in the residual view.
+      if(satno>0 && residuals) {
+        if(d.satname)cpgmtxt("T",3.0,0.0,0.0,d.satname);
+        format_tle(orb,line1,line2);
+        cpgmtxt("T",2.0,0.0,0.0,line1);
+        cpgmtxt("T",1.0,0.0,0.0,line2);
+      }
       // Plot orbit
       if (satno>0 && plot_curve==1 && residuals==0) {
 
@@ -679,7 +763,7 @@ int main(int argc,char *argv[])
 	style=17;
 	
 	x=d.p[i].t;
-	y=d.p[i].f;
+	y=residuals ? d.p[i].res : d.p[i].f;
 	if (d.p[i].flag==1) {
 	  cpgsci(color);
 	  if (d.p[i].rsite_id==0)
@@ -700,6 +784,12 @@ int main(int argc,char *argv[])
       redraw=0;
     }
     
+    if(export_device) {
+      printf("render_rms_hz=%.9f frequency_hz=%.6f n=%d TCA_UTC=%s TEP_UTC=%s\n",
+             rms*1000.,d.ffit*1000.,nobs,mjdtca>0?nfdtca:"unavailable",nfdepoch);
+      break;
+    }
+
     // Get cursor
     cpgband(mode,posn,x0,y0,&x,&y,&c);
 
@@ -942,16 +1032,18 @@ int main(int argc,char *argv[])
       redraw=1;
     }
 
-    // Toggle residuals
-    if (c=='j') {
+    // Toggle residuals: refresh model, use signed residuals and their own limits.
+    if (c=='j' && satno>0) {
+      rms=compute_rms();
       fpres=fopen("residuals.dat","w");
-      for (i=0;i<d.n;i++) 
-	fprintf(fpres,"%14.8lf %lf %lf %d\n",d.p[i].mjd,d.p[i].freq,d.p[i].res,d.p[i].site_id);
-      fclose(fpres);
-      if (residuals==0)
-	residuals=1;
-      else if (residuals==1)
-	residuals=0;
+      if(fpres) {
+        fprintf(fpres,"# MJD observed_kHz residual_kHz site\n");
+        for(i=0;i<d.n;i++)if(d.p[i].flag)
+          fprintf(fpres,"%.10f %.9f %.9f %d\n",d.p[i].mjd,d.p[i].freq,d.p[i].res,d.p[i].site_id);
+        fclose(fpres);
+      } else perror("residuals.dat");
+      if(!residuals) {frequency_ymin=ymin;frequency_ymax=ymax;residuals=1;}
+      else {residuals=0;ymin=frequency_ymin;ymax=frequency_ymax;}
       redraw=1;
     }
 
@@ -1195,6 +1287,7 @@ int main(int argc,char *argv[])
       printf("================================================================================\n");
       printf("q   Quit\n");
       printf("p   Toggle curve plotting\n");
+      printf("j   Toggle residual plot and export residuals.dat (kHz)\n");
       printf("1   Toggle fitting parameter (Inclination)\n");
       printf("2   Toggle fitting parameter (RA of ascending node)\n");
       printf("3   Toggle fitting parameter (Eccentricity)\n");
@@ -1253,7 +1346,6 @@ int main(int argc,char *argv[])
   free(d.p);
   free_tles(tle_array);
 
-  fclose(stderr);
 
   return 0;
 }
@@ -1279,13 +1371,14 @@ struct point decode_line(char *line)
   int year,month,iday,hour,min,sec,fsec;
   double day;
   struct point p;
-  int site_id,rsite_id,nread,status;
+  int site_id=-1,rsite_id=-1,nread,status;
 
   // Get timestamp
-  if (line[5]=='.') {
+  if (strlen(line)>5 && line[5]=='.') {
     site_id=-1;
     rsite_id=-1;
     nread=sscanf(line,"%lf %lf %f %d %d",&p.mjd,&p.freq,&p.flux,&site_id,&rsite_id);
+    if(nread<4){fprintf(stderr,"Malformed measurement row\n");exit(1);}
   } else {
     strncpy(p.timestamp,line,19);
     p.timestamp[19]='\0';
@@ -1294,10 +1387,12 @@ struct point decode_line(char *line)
     site_id=-1;
     status=sscanf(line,"%2d/%2d/%2d %2d:%2d:%2d.%1d %lf %f %d",&year,&month,&iday,&hour,&min,&sec,&fsec,&p.freq,&p.flux,&site_id);
 
+    if(status!=10){fprintf(stderr,"Malformed timestamp row\n");exit(1);}
     day=iday+hour/24.0+min/1440.0+(sec+0.1*fsec)/86400.0;
     p.mjd=date2mjd(2000+year,month,day);
   }
 
+  if(!isfinite(p.mjd)||!isfinite(p.freq)||!isfinite(p.flux)||p.freq<=0){fprintf(stderr,"Nonfinite/invalid measurement\n");exit(1);}
   // Decode site
   p.s=get_site(site_id);
   p.site_id=site_id;
@@ -1338,10 +1433,12 @@ struct data read_data(char *filename,int graves,float offset)
   while (fgetline(file,line,LIM)>0) 
     i++;
   d.n=i;
+  if(d.n<2){fprintf(stderr,"At least two measurement rows required\n");exit(1);}
 
   // Allocate
   d.p=(struct point *) malloc(sizeof(struct point)*d.n);
 
+  if(!d.p){fprintf(stderr,"Measurement allocation failed\n");exit(1);}
   // Rewind file
   rewind(file);
 
@@ -1350,6 +1447,8 @@ struct data read_data(char *filename,int graves,float offset)
   while (fgetline(file,line,LIM)>0) 
     d.p[i++]=decode_line(line);
 
+  for(i=1;i<d.n;i++) if(d.p[i].mjd<d.p[i-1].mjd){fprintf(stderr,"Measurements must be chronological\n");exit(1);}
+  if(d.p[d.n-1].mjd<=d.p[0].mjd){fprintf(stderr,"Measurement duration must be positive\n");exit(1);}
   // Close file
   fclose(file);
 
@@ -1726,7 +1825,7 @@ double compute_rms(void)
 
   // Compute rms
   for (i=0,n=0,rms=0.0;i<d.n;i++) {
-    if (d.p[i].flag==2) {
+    if (d.p[i].flag!=0) {
       velocity(orb,d.p[i].mjd,d.p[i].s,&v,&azi,&alt);
       if (d.p[i].rsite_id!=0) {
 	velocity(orb,d.p[i].mjd,d.p[i].r,&v1,&azi,&alt);
@@ -1736,9 +1835,7 @@ double compute_rms(void)
       }
       d.p[i].freq0=f;
       d.p[i].res=d.p[i].freq-f;
-      rms+=pow(d.p[i].freq-f,2);
-
-      n++;
+      if(d.p[i].flag==2) {rms+=pow(d.p[i].freq-f,2);n++;}
     }
   }
   if (n>0)

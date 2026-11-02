@@ -26,6 +26,34 @@
 /rfplot
 /rfpng
 /rfinfo
-/tests/tests
 
 .env
+
+# Python environment
+.venv/
+__pycache__/
+*.pyc
+
+/rffit-batch
+
+# Local observations, catalogs, results and credentials
+/data/*
+!/data/frequencies.txt
+!/data/sites.txt
+/Hasil.md
+/results/
+/outputs/
+.env.*
+*.log
+*.bin
+*.iq
+*.wav
+*.dat
+*.tle
+*.csv
+*.png
+*.svg
+*.pdf
+*.zip
+*.pem
+*.key
